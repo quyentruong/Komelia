@@ -1,18 +1,16 @@
-name: Build Android ARM64 APK
+name: Build Android ARM64 APK (Full Cache)
 
 on:
-  workflow_dispatch:  # Cho phép trigger thủ công
+  workflow_dispatch:
   push:
     branches: [ main ]
-    paths:
-      - 'komelia-app/src/androidMain/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         submodules: recursive
@@ -28,32 +26,104 @@ jobs:
       with:
         node-version: '20'
 
-    # ✅ FIX: Tạo thư mục build và set quyền
-    - name: Prepare build directories
+    # ========================================
+    # CACHE LAYER 1: Gradle
+    # ========================================
+    - name: Cache Gradle
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: ${{ runner.os }}-gradle-
+
+    # ========================================
+    # CACHE LAYER 2: Docker Buildx
+    # ========================================
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-docker-${{ hashFiles('cmake/android.Dockerfile') }}
+        restore-keys: ${{ runner.os }}-docker-
+
+    - name: Build Docker image (cached)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./cmake/android.Dockerfile
+        tags: komelia-build-android
+        load: true
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+    # ========================================
+    # CACHE LAYER 3: WebUI node_modules
+    # ========================================
+    - name: Cache WebUI node_modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          komelia-epub-reader/*/node_modules
+        key: ${{ runner.os }}-webui-${{ hashFiles('komelia-epub-reader/**/package-lock.json') }}
+        restore-keys: ${{ runner.os }}-webui-
+
+    # ========================================
+    # CACHE LAYER 4: Native build output
+    # ========================================
+    - name: Cache native build
+      uses: actions/cache@v4
+      with:
+        path: cmake/build-android-aarch64
+        key: ${{ runner.os }}-native-${{ hashFiles('cmake/**', 'third_party/**', 'komelia-infra/**/*.cpp', 'komelia-infra/**/*.h') }}
+        restore-keys: ${{ runner.os }}-native-
+
+    # ========================================
+    # BUILD
+    # ========================================
+    - name: Prepare directories
       run: |
         mkdir -p cmake/build-android-aarch64
         sudo chown -R 1000:1000 .
 
-    - name: Build native libraries (ARM64) with Docker
-      run: |
-        docker build -t komelia-build-android . -f ./cmake/android.Dockerfile
-        docker run -v $PWD:/build komelia-build-android aarch64
+    - name: Build native libraries
+      run: docker run -v $PWD:/build komelia-build-android aarch64
 
-    # ✅ FIX: Lấy lại quyền owner sau khi Docker chạy xong
-    - name: Fix permissions after Docker
+    - name: Fix permissions
       run: sudo chown -R $(id -u):$(id -g) .
 
     - name: Copy JNI libraries
-      run: ./gradlew aarch64_copyJniLibs
+      run: ./gradlew android-aarch64_copyJniLibs
 
     - name: Build WebUI
       run: ./gradlew buildWebui
 
-    - name: Build APK
-      run: ./gradlew :komelia-app:assembleDebug
+    - name: Build Debug APK
+      run: ./gradlew :komelia-app:assembleDebug --build-cache --parallel
+
+    # ========================================
+    # CLEANUP & UPLOAD
+    # ========================================
+    - name: Move Docker cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: komelia-arm64-release
-        path: komelia-app/build/outputs/apk/release/*.apk
+        name: komelia-arm64-v${{ github.run_number }}
+        path: komelia-app/build/outputs/apk/debug/*.apk
+        retention-days: 7
+
+    - name: Upload build summary
+      run: |
+        echo "### ✅ Build Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Architecture:** ARM64 (aarch64)" >> $GITHUB_STEP_SUMMARY
+        echo "**Build Type:** Debug" >> $GITHUB_STEP_SUMMARY
+        echo "**APK Name:** \`komelia-arm64-v${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
