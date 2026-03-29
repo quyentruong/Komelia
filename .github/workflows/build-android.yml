@@ -28,10 +28,20 @@ jobs:
       with:
         node-version: '20'
 
+    # ✅ FIX: Tạo thư mục build và set quyền
+    - name: Prepare build directories
+      run: |
+        mkdir -p cmake/build-android-aarch64
+        sudo chown -R 1000:1000 .
+
     - name: Build native libraries (ARM64) with Docker
       run: |
         docker build -t komelia-build-android . -f ./cmake/android.Dockerfile
         docker run -v $PWD:/build komelia-build-android aarch64
+
+    # ✅ FIX: Lấy lại quyền owner sau khi Docker chạy xong
+    - name: Fix permissions after Docker
+      run: sudo chown -R $(id -u):$(id -g) .
 
     - name: Copy JNI libraries
       run: ./gradlew aarch64_copyJniLibs
