@@ -85,15 +85,7 @@ jobs:
       with:
         path: |
           cmake/build-android-aarch64
-        key: ${{ runner.os }}-native-arm64-${{ hashFiles(
-          'cmake/**/*.cmake',
-          'cmake/**/CMakeLists.txt',
-          'third_party/**',
-          'komelia-infra/**/*.cpp',
-          'komelia-infra/**/*.c',
-          'komelia-infra/**/*.h',
-          'komelia-infra/**/CMakeLists.txt'
-        ) }}
+        key: ${{ runner.os }}-native-arm64-${{ hashFiles('cmake/**', 'third_party/**', 'komelia-infra/**') }}
         restore-keys: |
           ${{ runner.os }}-native-arm64-
 
