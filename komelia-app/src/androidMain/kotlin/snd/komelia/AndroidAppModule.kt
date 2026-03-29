@@ -246,7 +246,7 @@ class AndroidAppModule(
             install(HttpTimeout) {
                 requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
                 connectTimeoutMillis = 30_000
-                socketTimeoutMillis = 30_000
+                socketTimeoutMillis = 60_000
             }
         }
 
