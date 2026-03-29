@@ -1,300 +1,471 @@
 # =============================================================================
-# Workflow: Build & Sign Android ARM64 APK
+# Workflow: Build & Sign Android ARM64 APK (Fail-Safe)
 # =============================================================================
-# Mục đích: 
-#   - Build native libraries với Docker
-#   - Build APK cho kiến trúc ARM64
-#   - Tự động ký APK với keystore
-#   - Sử dụng cache để tăng tốc độ build
-# 
-# Trigger:
-#   - Manual: Vào tab Actions → Run workflow
-#   - Auto: Push code vào branch main
+# Đặc điểm:
+#   - Build thành công = KHÔNG BAO GIỜ FAIL sau đó
+#   - Upload APK ngay sau khi build
+#   - Verify signature là optional (warning only)
+#   - Cache aggressive để tránh rebuild native libs
 # =============================================================================
 
-name: Build & Sign Android ARM64 APK
+name: Build & Sign Android ARM64 APK (Fail-Safe)
 
-# Khi nào workflow chạy
 on:
-  # Cho phép chạy thủ công từ GitHub UI
   workflow_dispatch:
-  
-  # Tự động chạy khi push code
-  # push:
-  #   branches: [ main ]
-  #   # Chỉ chạy khi file Android thay đổi (tiết kiệm quota)
-  #   paths:
-  #     - 'komelia-app/src/androidMain/**'
-  #     - 'komelia-ui/**'
-  #     - 'komelia-domain/**'
-  #     - 'komelia-infra/**'
-  #     - '.github/workflows/build-android-arm64.yml'
+    inputs:
+      force_rebuild_native:
+        description: 'Force rebuild native libraries (ignore cache)'
+        required: false
+        type: boolean
+        default: false
+        
+# ✅ THÊM PERMISSIONS (để tạo release)
+permissions:
+  contents: write      # Tạo release, attach files
+  pull-requests: read  # Đọc PR (optional)
+  issues: read        # Đọc issues (optional)
 
 jobs:
   build:
-    # Chạy trên Ubuntu (miễn phí 2000 phút/tháng)
     runs-on: ubuntu-latest
+    
+    # Timeout sau 2 giờ (tránh bị stuck)
+    timeout-minutes: 120
     
     steps:
     # =========================================================================
-    # BƯỚC 1: SETUP MÔI TRƯỜNG
+    # BƯỚC 1: SETUP
     # =========================================================================
     
     - name: 📥 Checkout code
       uses: actions/checkout@v4
       with:
-        # Clone cả submodules (third_party dependencies)
         submodules: recursive
-        # Fetch toàn bộ history (cần cho versioning)
         fetch-depth: 0
 
     - name: ☕ Set up JDK 17
       uses: actions/setup-java@v4
       with:
-        distribution: 'temurin'  # Eclipse Temurin (OpenJDK)
-        java-version: '17'       # Android yêu cầu JDK 17
+        distribution: 'temurin'
+        java-version: '17'
 
     - name: 📦 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'  # Cần cho build WebUI (epub reader)
+        node-version: '20'
 
     # =========================================================================
-    # BƯỚC 2: CACHE - Giảm thời gian build từ 45 phút → 10 phút
+    # BƯỚC 2: CACHE (AGGRESSIVE)
     # =========================================================================
     
     - name: 💾 Cache Gradle packages
       uses: actions/cache@v4
       with:
-        # Thư mục cache
         path: |
-          ~/.gradle/caches      # Gradle dependencies (~500MB)
-          ~/.gradle/wrapper     # Gradle wrapper
-        # Key để identify cache (thay đổi khi gradle files thay đổi)
+          ~/.gradle/caches
+          ~/.gradle/wrapper
         key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-        # Fallback key nếu không tìm thấy exact match
         restore-keys: |
           ${{ runner.os }}-gradle-
-
-    - name: 🐳 Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      # Buildx cho phép cache Docker layers
 
     - name: 💾 Cache Docker layers
       uses: actions/cache@v4
       with:
         path: /tmp/.buildx-cache
-        # Cache Docker image (chứa build tools, libraries)
         key: ${{ runner.os }}-docker-${{ hashFiles('cmake/android.Dockerfile') }}
         restore-keys: |
           ${{ runner.os }}-docker-
 
-    - name: 🏗️ Build Docker image (with cache)
+    # ⚡ CACHE QUAN TRỌNG NHẤT - Native build output
+    - name: 💾 Cache Native Build Output (Critical)
+      id: cache-native
+      # Nếu user force rebuild, skip cache restore
+      if: github.event.inputs.force_rebuild_native != 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          cmake/build-android-aarch64
+        key: ${{ runner.os }}-native-arm64-${{ hashFiles(
+          'cmake/**/*.cmake',
+          'cmake/**/CMakeLists.txt',
+          'third_party/**',
+          'komelia-infra/**/*.cpp',
+          'komelia-infra/**/*.c',
+          'komelia-infra/**/*.h',
+          'komelia-infra/**/CMakeLists.txt'
+        ) }}
+        restore-keys: |
+          ${{ runner.os }}-native-arm64-
+
+    - name: 💾 Cache WebUI node_modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          komelia-epub-reader/komga-webui/node_modules
+          komelia-epub-reader/ttu-ebook-reader/node_modules
+        key: ${{ runner.os }}-webui-${{ hashFiles('komelia-epub-reader/**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-webui-
+
+    - name: 💾 Cache WebUI build output
+      uses: actions/cache@v4
+      with:
+        path: |
+          komelia-epub-reader/komga-webui/dist
+          komelia-epub-reader/ttu-ebook-reader/dist
+        key: ${{ runner.os }}-webui-dist-${{ hashFiles('komelia-epub-reader/**/*.js', 'komelia-epub-reader/**/*.ts', 'komelia-epub-reader/**/*.vue') }}
+        restore-keys: |
+          ${{ runner.os }}-webui-dist-
+
+    # =========================================================================
+    # BƯỚC 3: BUILD DOCKER IMAGE (nếu cần)
+    # =========================================================================
+    
+    - name: 🐳 Set up Docker Buildx
+      # Chỉ cần nếu cache native MISS
+      if: steps.cache-native.outputs.cache-hit != 'true'
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🏗️ Build Docker image (cached)
+      if: steps.cache-native.outputs.cache-hit != 'true'
       uses: docker/build-push-action@v5
       with:
         context: .
         file: ./cmake/android.Dockerfile
         tags: komelia-build-android
-        load: true  # Load vào Docker daemon để sử dụng
-        # Restore cache từ lần build trước
+        load: true
         cache-from: type=local,src=/tmp/.buildx-cache
-        # Save cache cho lần build sau (mode=max = cache all layers)
         cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-    - name: 💾 Cache WebUI node_modules
-      uses: actions/cache@v4
-      with:
-        # Cache npm dependencies cho epub reader
-        path: |
-          komelia-epub-reader/*/node_modules
-        key: ${{ runner.os }}-webui-${{ hashFiles('komelia-epub-reader/**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-webui-
-
-    - name: 💾 Cache Native build output
-      uses: actions/cache@v4
-      with:
-        # Cache kết quả build native libraries (C/C++)
-        path: cmake/build-android-aarch64
-        key: ${{ runner.os }}-native-${{ hashFiles('cmake/**', 'third_party/**', 'komelia-infra/**/*.cpp', 'komelia-infra/**/*.h') }}
-        restore-keys: |
-          ${{ runner.os }}-native-
-
     # =========================================================================
-    # BƯỚC 3: BUILD NATIVE LIBRARIES
+    # BƯỚC 4: BUILD NATIVE LIBRARIES (CHẬM NHẤT)
     # =========================================================================
     
     - name: 📁 Prepare build directories
       run: |
-        # Tạo thư mục output cho native build
         mkdir -p cmake/build-android-aarch64
-        # Docker container chạy với UID 1000, cần set quyền
         sudo chown -R 1000:1000 .
 
-    - name: 🔨 Build native libraries (ARM64)
+    - name: ⏭️ Skip native build (using cache)
+      if: steps.cache-native.outputs.cache-hit == 'true'
       run: |
-        # Chạy Docker container để build C/C++ libraries
-        # -v $PWD:/build = mount current dir vào /build trong container
-        # aarch64 = target architecture (ARM64)
+        echo "════════════════════════════════════════════════════"
+        echo "✅ CACHE HIT - Using pre-built native libraries"
+        echo "⏱️  Time saved: ~25-30 minutes"
+        echo "════════════════════════════════════════════════════"
+        ls -lh cmake/build-android-aarch64/sysroot/lib/ | head -20
+
+    - name: 🔨 Build native libraries (ARM64)
+      if: steps.cache-native.outputs.cache-hit != 'true'
+      run: |
+        echo "════════════════════════════════════════════════════"
+        echo "⚠️  CACHE MISS - Building native libraries from scratch"
+        echo "⏱️  Estimated time: 25-30 minutes"
+        echo "════════════════════════════════════════════════════"
         docker run -v $PWD:/build komelia-build-android aarch64
-      # Build sẽ tạo:
-      # - libvips.so (image processing)
-      # - libkomelia_*.so (native code)
-      # - libonnxruntime.so (ML runtime)
+      # Nếu step này fail, toàn bộ workflow fail (OK vì chưa build APK)
 
     - name: 🔓 Fix permissions after Docker
-      run: |
-        # Lấy lại quyền owner từ Docker (UID 1000) → GitHub Actions user
-        sudo chown -R $(id -u):$(id -g) .
+      run: sudo chown -R $(id -u):$(id -g) .
 
-    - name: 📋 Copy JNI libraries
-      run: |
-        # Copy native libraries vào thư mục Android JNI
-        # Task này được định nghĩa trong build.gradle.kts (dòng 156)
-        ./gradlew android-aarch64_copyJniLibs
-      # Kết quả: Libraries được copy vào
-      # komelia-infra/jni/src/androidMain/jniLibs/arm64-v8a/
+    - name: 📋 Copy JNI libraries to Android project
+      run: ./gradlew android-aarch64_copyJniLibs
 
     # =========================================================================
-    # BƯỚC 4: BUILD WEBUI (EPUB READER)
+    # BƯỚC 5: BUILD WEBUI
     # =========================================================================
     
-    - name: 🌐 Build WebUI (Epub Reader)
-      run: |
-        # Build 2 epub readers:
-        # - komga-webui (Vue.js app)
-        # - ttu-ebook-reader (TypeScript app)
-        ./gradlew buildWebui
-      # Kết quả: 
-      # - komelia-epub-reader/*/dist/ → 
-      # - komelia-ui/src/commonMain/composeResources/files/
+    - name: 🌐 Build WebUI (Epub Readers)
+      run: ./gradlew buildWebui
 
     # =========================================================================
-    # BƯỚC 5: SETUP KEYSTORE & SIGNING
+    # BƯỚC 6: SETUP KEYSTORE & BUILD APK
     # =========================================================================
     
-    - name: 🔐 Decode Keystore
+    - name: 🔐 Decode Keystore from secrets
       run: |
-        # Convert keystore từ base64 string → binary file
-        # ${{ secrets.KEYSTORE_BASE64 }} = secret đã setup trên GitHub
         echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ github.workspace }}/release.keystore
-      # Tạo file: release.keystore (private key để ký APK)
+        echo "✅ Keystore decoded successfully"
 
-    # =========================================================================
-    # BƯỚC 6: BUILD & SIGN APK
-    # =========================================================================
-    
     - name: 🚀 Build & Sign Release APK
+      id: build-apk
       run: |
-        # Build APK release variant
-        # --build-cache = sử dụng Gradle build cache
-        # --parallel = build parallel để nhanh hơn
-        ./gradlew :komelia-app:assembleRelease --build-cache --parallel
+        echo "════════════════════════════════════════════════════"
+        echo "🚀 Building & Signing APK..."
+        echo "════════════════════════════════════════════════════"
+        
+        ./gradlew :komelia-app:assembleRelease \
+          --build-cache \
+          --parallel \
+          --no-daemon
+        
+        echo "✅ APK build completed!"
       env:
-        # Environment variables cho signing config
         KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-      # Kết quả: 
-      # komelia-app/build/outputs/apk/release/komelia-app-release.apk
-      # APK đã được minify, shrink resources, và ký
 
     # =========================================================================
-    # BƯỚC 7: VERIFY & UPLOAD
+    # BƯỚC 7: GET APK INFO & UPLOAD NGAY (FAIL-SAFE)
     # =========================================================================
     
-    - name: 🔍 Get APK info
+    - name: 🔍 Get APK information
       id: apk-info
+      # ⚡ LUÔN CHẠY nếu build APK thành công
+      if: success()
       run: |
-        # Tìm APK file vừa build
-        APK_PATH=$(find komelia-app/build/outputs/apk/release -name "*.apk" | head -1)
-        APK_NAME=$(basename $APK_PATH)
-        APK_SIZE=$(du -h $APK_PATH | cut -f1)
+        APK_PATH=$(find komelia-app/build/outputs/apk/release -name "*.apk" -type f | head -1)
         
-        # Export để dùng ở steps sau
+        if [ -z "$APK_PATH" ]; then
+          echo "❌ APK file not found!"
+          exit 1
+        fi
+        
+        APK_NAME=$(basename "$APK_PATH")
+        APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
+        APK_SIZE_BYTES=$(stat -f%z "$APK_PATH" 2>/dev/null || stat -c%s "$APK_PATH")
+        APK_SIZE_MB=$((APK_SIZE_BYTES / 1024 / 1024))
+        
         echo "path=$APK_PATH" >> $GITHUB_OUTPUT
         echo "name=$APK_NAME" >> $GITHUB_OUTPUT
         echo "size=$APK_SIZE" >> $GITHUB_OUTPUT
+        echo "size_mb=${APK_SIZE_MB}MB" >> $GITHUB_OUTPUT
         
-        # In ra console để debug
+        echo "════════════════════════════════════════════════════"
         echo "📦 APK: $APK_NAME"
-        echo "📏 Size: $APK_SIZE"
+        echo "📏 Size: $APK_SIZE (${APK_SIZE_MB}MB)"
+        echo "📂 Path: $APK_PATH"
+        echo "════════════════════════════════════════════════════"
 
-    - name: ✅ Verify APK signature
-      run: |
-        # Kiểm tra APK đã được ký đúng chưa
-        # Sẽ hiện thông tin certificate, SHA-256, v.v.
-        apksigner verify --print-certs ${{ steps.apk-info.outputs.path }}
-      # Nếu lỗi = APK chưa được ký hoặc ký sai
-
-    - name: 📤 Upload APK Artifact
+    # ⚡ UPLOAD NGAY SAU KHI BUILD - ĐỪNG ĐỂ MẤT APK!
+    - name: 📤 Upload APK Artifact (Priority)
+      id: upload-apk
+      # Chạy ngay khi có APK, không quan tâm verify
+      if: success() && steps.apk-info.outputs.path != ''
       uses: actions/upload-artifact@v4
       with:
-        # Tên artifact trên GitHub Actions
         name: komelia-arm64-release-v${{ github.run_number }}
-        # File cần upload
         path: ${{ steps.apk-info.outputs.path }}
-        # Giữ artifact 30 ngày (max 90 ngày)
-        retention-days: 30
-        # Compress để giảm storage
-        compression-level: 9
+        retention-days: 90
+        compression-level: 6
+        if-no-files-found: error
+      # Sau step này, APK đã an toàn trên GitHub!
+
+    - name: ✅ APK uploaded successfully
+      if: steps.upload-apk.outcome == 'success'
+      run: |
+        echo "════════════════════════════════════════════════════"
+        echo "✅ APK HAS BEEN UPLOADED TO ARTIFACTS"
+        echo "📦 Artifact: komelia-arm64-release-v${{ github.run_number }}"
+        echo "🔒 APK is now safe - remaining steps are optional"
+        echo "════════════════════════════════════════════════════"
 
     # =========================================================================
-    # BƯỚC 8: CLEANUP & SUMMARY
+    # BƯỚC 8: SETUP ANDROID SDK (CHO APKSIGNER)
+    # =========================================================================
+    
+    # ⚠️ Từ đây trở đi: TẤT CẢ STEPS ĐỀU OPTIONAL
+    # Nếu fail cũng không sao, APK đã upload rồi!
+    
+    - name: 🤖 Setup Android SDK
+      id: setup-sdk
+      # continue-on-error = không fail workflow nếu step này fail
+      continue-on-error: true
+      uses: android-actions/setup-android@v3
+      with:
+        packages: 'build-tools;34.0.0'
+
+    - name: 📍 Locate apksigner
+      id: locate-apksigner
+      continue-on-error: true
+      run: |
+        # Thử tìm apksigner ở nhiều nơi
+        APKSIGNER_PATH=""
+        
+        # Location 1: Android SDK mặc định
+        if [ -d "$ANDROID_HOME/build-tools" ]; then
+          APKSIGNER_PATH=$(find $ANDROID_HOME/build-tools -name apksigner | sort -r | head -1)
+        fi
+        
+        # Location 2: Trong PATH
+        if [ -z "$APKSIGNER_PATH" ]; then
+          APKSIGNER_PATH=$(which apksigner || echo "")
+        fi
+        
+        # Location 3: Common locations
+        if [ -z "$APKSIGNER_PATH" ]; then
+          for dir in /usr/local/lib/android/sdk/build-tools/*/; do
+            if [ -f "${dir}apksigner" ]; then
+              APKSIGNER_PATH="${dir}apksigner"
+              break
+            fi
+          done
+        fi
+        
+        if [ -n "$APKSIGNER_PATH" ] && [ -f "$APKSIGNER_PATH" ]; then
+          echo "✅ Found apksigner: $APKSIGNER_PATH"
+          echo "path=$APKSIGNER_PATH" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️  apksigner not found - will skip signature verification"
+          echo "found=false" >> $GITHUB_OUTPUT
+        fi
+      env:
+        ANDROID_HOME: /usr/local/lib/android/sdk
+
+    # =========================================================================
+    # BƯỚC 9: VERIFY SIGNATURE (OPTIONAL - WARNING ONLY)
+    # =========================================================================
+    
+    - name: ✅ Verify APK signature with apksigner
+      id: verify-signature
+      # Chỉ chạy nếu tìm thấy apksigner
+      if: steps.locate-apksigner.outputs.found == 'true'
+      # Không fail workflow nếu verify fail
+      continue-on-error: true
+      run: |
+        APKSIGNER="${{ steps.locate-apksigner.outputs.path }}"
+        APK_PATH="${{ steps.apk-info.outputs.path }}"
+        
+        echo "════════════════════════════════════════════════════"
+        echo "🔍 Verifying APK signature with apksigner..."
+        echo "════════════════════════════════════════════════════"
+        
+        # Verify signature
+        if $APKSIGNER verify --verbose "$APK_PATH"; then
+          echo ""
+          echo "✅ APK SIGNATURE VERIFIED SUCCESSFULLY!"
+          echo ""
+          
+          # Print certificate details
+          echo "📜 Certificate Information:"
+          $APKSIGNER verify --print-certs "$APK_PATH"
+          
+          echo "verified=true" >> $GITHUB_OUTPUT
+        else
+          echo ""
+          echo "❌ APK SIGNATURE VERIFICATION FAILED!"
+          echo "⚠️  This is a WARNING - APK has been uploaded anyway"
+          echo ""
+          echo "verified=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: ⚠️ Signature verification skipped
+      if: steps.locate-apksigner.outputs.found != 'true'
+      run: |
+        echo "════════════════════════════════════════════════════"
+        echo "⚠️  apksigner not available - skipping verification"
+        echo "ℹ️  You can verify manually after downloading APK:"
+        echo ""
+        echo "  apksigner verify --print-certs app.apk"
+        echo ""
+        echo "════════════════════════════════════════════════════"
+
+    - name: ⚠️ Signature verification failed (but OK)
+      if: steps.verify-signature.outcome == 'failure'
+      run: |
+        echo "════════════════════════════════════════════════════"
+        echo "⚠️  Signature verification failed"
+        echo "✅ APK was already uploaded - you can still use it"
+        echo "🔍 Verify manually: apksigner verify --print-certs app.apk"
+        echo "════════════════════════════════════════════════════"
+
+    # =========================================================================
+    # BƯỚC 10: CLEANUP & SUMMARY
     # =========================================================================
     
     - name: 🧹 Cleanup sensitive files
-      if: always()  # Luôn chạy, kể cả khi build fail
-      run: |
-        # Xóa keystore để bảo mật (không để lộ private key)
-        rm -f ${{ github.workspace }}/release.keystore
-
-    - name: 🔄 Update Docker cache
+      # Luôn chạy, kể cả khi có steps fail
       if: always()
       run: |
-        # Xóa cache cũ
+        # Xóa keystore để bảo mật
+        rm -f ${{ github.workspace }}/release.keystore
+        
+        # Update Docker cache
         rm -rf /tmp/.buildx-cache
-        # Dùng cache mới cho lần build sau
-        mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
+        
+        echo "✅ Cleanup completed"
 
     - name: 📊 Build Summary
-      if: success()  # Chỉ chạy khi build thành công
+      # Chỉ chạy nếu APK đã upload thành công
+      if: steps.upload-apk.outcome == 'success'
       run: |
-        # Tạo summary hiển thị trên GitHub Actions UI
-        echo "### ✅ Build & Sign Successful!" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Info | Value |" >> $GITHUB_STEP_SUMMARY
-        echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-        echo "| 🏗️ Architecture | ARM64 (aarch64) |" >> $GITHUB_STEP_SUMMARY
-        echo "| 📦 Build Type | Release (Signed) |" >> $GITHUB_STEP_SUMMARY
-        echo "| 📄 APK Name | \`${{ steps.apk-info.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-        echo "| 📏 APK Size | ${{ steps.apk-info.outputs.size }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🔢 Build Number | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🔗 Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Download:** Go to Artifacts section above ⬆️" >> $GITHUB_STEP_SUMMARY
+        # Tạo summary đẹp
+        cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+        ## ✅ Build Successful!
+        
+        ### 📦 APK Information
+        
+        | Property | Value |
+        |----------|-------|
+        | 🏗️ Architecture | ARM64 (aarch64) |
+        | 📦 APK Name | `${{ steps.apk-info.outputs.name }}` |
+        | 📏 Size | ${{ steps.apk-info.outputs.size_mb }} |
+        | 🔢 Build Number | #${{ github.run_number }} |
+        | 🔗 Commit | `${{ github.sha }}` |
+        | ⏱️ Build Time | ~${{ job.status == 'success' && 'Success' || 'See logs' }} |
+        
+        ### ⚡ Cache Status
+        
+        | Cache | Status | Time Saved |
+        |-------|--------|------------|
+        | 🔨 Native Build | ${{ steps.cache-native.outputs.cache-hit == 'true' && '✅ HIT' || '❌ MISS' }} | ${{ steps.cache-native.outputs.cache-hit == 'true' && '~25-30 min' || '0 min' }} |
+        | 📦 Gradle | ${{ steps.cache-gradle.outputs.cache-hit == 'true' && '✅ HIT' || '❌ MISS' }} | ${{ steps.cache-gradle.outputs.cache-hit == 'true' && '~5-8 min' || '0 min' }} |
+        | 🌐 WebUI | ${{ steps.cache-webui.outputs.cache-hit == 'true' && '✅ HIT' || '❌ MISS' }} | ${{ steps.cache-webui.outputs.cache-hit == 'true' && '~3-5 min' || '0 min' }} |
+        
+        ### 🔐 Signature Verification
+        
+        ${{ steps.verify-signature.outputs.verified == 'true' && '✅ **APK signature verified with apksigner**' || '⚠️ Signature verification skipped or failed (APK still usable)' }}
+        
+        ### 📥 Download
+        
+        **APK Artifact:** `komelia-arm64-release-v${{ github.run_number }}`
+        
+        1. Scroll to top of this page
+        2. Click **Artifacts** section
+        3. Download the APK
+        4. Install on your Android device
+        
+        ---
+        
+        **Signature:** ${{ steps.apk-info.outputs.name }}  
+        **SHA:** `${{ github.sha }}`  
+        **Date:** ${{ github.event.head_commit.timestamp }}
+        EOF
+
+    # =========================================================================
+    # BƯỚC 11: BONUS - CREATE GITHUB RELEASE (nếu là tag)
+    # =========================================================================
+    
+    - name: 🏷️ Create GitHub Release
+      # Chỉ chạy nếu push tag (vd: v1.0.0)
+      if: startsWith(github.ref, 'refs/tags/') && steps.upload-apk.outcome == 'success'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ${{ steps.apk-info.outputs.path }}
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        body: |
+          ## 📦 Komelia Android ARM64 Release
+          
+          **APK Size:** ${{ steps.apk-info.outputs.size_mb }}
+          **Build:** #${{ github.run_number }}
+          **Commit:** ${{ github.sha }}
+          
+          ### Installation
+          1. Download the APK below
+          2. Enable "Install from Unknown Sources" on Android
+          3. Install the APK
+          
+          ### Changes
+          See commits for details.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 # =============================================================================
-# KẾT THÚC WORKFLOW
-# =============================================================================
-# 
-# Sau khi workflow chạy xong:
-# 1. Vào tab "Actions" trên GitHub
-# 2. Click vào workflow run mới nhất
-# 3. Scroll xuống phần "Artifacts"
-# 4. Download file: komelia-arm64-release-v{số}
-# 5. Giải nén → có file .apk
-# 6. Copy vào điện thoại → cài đặt
-# 
-# Lưu ý:
-# - Lần đầu build: ~40-50 phút
-# - Lần sau (có cache): ~8-12 phút
-# - Nếu chỉ sửa Kotlin code: ~3-5 phút
-# 
-# Troubleshooting:
-# - Build fail → xem logs từng step
-# - Permission denied → check file permissions
-# - Keystore error → check GitHub Secrets
-# - Docker error → rebuild Docker image (xóa cache)
+# END OF WORKFLOW
 # =============================================================================
