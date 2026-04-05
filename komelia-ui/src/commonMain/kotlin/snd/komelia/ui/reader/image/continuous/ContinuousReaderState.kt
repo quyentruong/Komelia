@@ -418,6 +418,22 @@ class ContinuousReaderState(
 
     private fun prefetchIfNeeded(page: PageMetadata) {
         val pageId = page.toPageId()
+
+        // Treat cancelled or failed cached jobs as cache misses so we can retry prefetching.
+        val cached = imageCache.get(pageId)
+        if (cached != null) {
+            if (cached.isCancelled) {
+                imageCache.invalidate(pageId)
+            } else if (cached.isCompleted) {
+                try {
+                    cached.getCompleted()
+                } catch (_: Throwable) {
+                    // Completed exceptionally — invalidate so we can retry.
+                    imageCache.invalidate(pageId)
+                }
+            }
+        }
+
         if (!imagesInUse.containsKey(pageId) && imageCache.get(pageId) == null) {
             val job = launchImageJob(page)
             imageLoadScope.launch {
