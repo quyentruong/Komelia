@@ -71,8 +71,10 @@ class PanelsReaderState(
 ) {
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val pageLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val prefetchPreviousCount = 1
+    private val prefetchNextCount = 10
     private val imageCache = Cache.Builder<PageId, Deferred<PanelsPage>>()
-        .maximumCacheSize(10)
+        .maximumCacheSize(40)
         .eventListener {
             val value = when (it) {
                 is Evicted -> it.value
@@ -399,12 +401,15 @@ class PanelsReaderState(
     }
 
     private fun preloadImagesBetween(pageIndex: Int) {
-        val previousPage = (pageIndex - 1).coerceAtLeast(0)
-        val nextPage = (pageIndex + 1).coerceAtMost(pageMetadata.value.size - 1)
-        val loadRange = (previousPage..nextPage).filter { it != pageIndex }
+        val pages = pageMetadata.value
+        if (pages.isEmpty()) return
+
+        val start = max(0, pageIndex - prefetchPreviousCount)
+        val end = min(pages.size - 1, pageIndex + prefetchNextCount)
+        val loadRange = (start..end).filter { it != pageIndex }
 
         for (index in loadRange) {
-            val imageJob = launchDownload(pageMetadata.value[index])
+            val imageJob = launchDownload(pages[index])
             pageLoadScope.launch {
                 val image = imageJob.await()
                 val scale = getScaleFor(image, screenScaleState.areaSize.value)
