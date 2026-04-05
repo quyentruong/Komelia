@@ -71,8 +71,11 @@ class PanelsReaderState(
 ) {
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val pageLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(2))
+    private val prefetchPreviousCount = 1
+    private val prefetchNextCount = 10
     private val imageCache = Cache.Builder<PageId, Deferred<PanelsPage>>()
-        .maximumCacheSize(10)
+        .maximumCacheSize(40)
         .eventListener {
             val value = when (it) {
                 is Evicted -> it.value
@@ -154,6 +157,7 @@ class PanelsReaderState(
 
     fun stop() {
         stateScope.coroutineContext.cancelChildren()
+        prefetchScope.coroutineContext.cancelChildren()
         screenScaleState.enableOverscrollArea(false)
         imageCache.invalidateAll()
     }
@@ -363,7 +367,6 @@ class PanelsReaderState(
     private suspend fun doPageLoad(pageIndex: Int) {
         val pageMeta = pageMetadata.value[pageIndex]
         val downloadJob = launchDownload(pageMeta)
-        preloadImagesBetween(pageIndex)
 
         if (downloadJob.isActive) {
             currentPage.value = PanelsPage(
@@ -378,6 +381,8 @@ class PanelsReaderState(
         }
 
         val page = downloadJob.await()
+        // Start prefetching only after the current page finished loading to avoid CPU contention.
+        preloadImagesBetween(pageIndex)
         val sortedPanelsPage = if (page.panelData != null) {
             val sortedPanels = sortPanels(
                 page.panelData.panels,
@@ -399,12 +404,15 @@ class PanelsReaderState(
     }
 
     private fun preloadImagesBetween(pageIndex: Int) {
-        val previousPage = (pageIndex - 1).coerceAtLeast(0)
-        val nextPage = (pageIndex + 1).coerceAtMost(pageMetadata.value.size - 1)
-        val loadRange = (previousPage..nextPage).filter { it != pageIndex }
+        val pages = pageMetadata.value
+        if (pages.isEmpty()) return
+
+        val start = max(0, pageIndex - prefetchPreviousCount)
+        val end = min(pages.size - 1, pageIndex + prefetchNextCount)
+        val loadRange = (start..end).filter { it != pageIndex }
 
         for (index in loadRange) {
-            val imageJob = launchDownload(pageMetadata.value[index])
+            val imageJob = launchDownload(pages[index], prefetchScope)
             pageLoadScope.launch {
                 val image = imageJob.await()
                 val scale = getScaleFor(image, screenScaleState.areaSize.value)
@@ -413,12 +421,12 @@ class PanelsReaderState(
         }
     }
 
-    private fun launchDownload(meta: PageMetadata): Deferred<PanelsPage> {
+    private fun launchDownload(meta: PageMetadata, scope: CoroutineScope = pageLoadScope): Deferred<PanelsPage> {
         val pageId = meta.toPageId()
         val cached = imageCache.get(pageId)
         if (cached != null && !cached.isCancelled) return cached
 
-        val loadJob: Deferred<PanelsPage> = pageLoadScope.async {
+        val loadJob: Deferred<PanelsPage> = scope.async {
             val imageResult = imageLoader.loadReaderImage(meta.bookId, meta.pageNumber)
             val image = imageResult.image ?: return@async PanelsPage(
                 metadata = meta,
