@@ -569,19 +569,21 @@ class ContinuousReaderState(
         val containerSize = screenScaleState.areaSize.value
         return when (readingDirection.value) {
             TOP_TO_BOTTOM -> {
-                val width = containerSize.width - (sidePaddingPx.value * 2)
+                val width = (containerSize.width - (sidePaddingPx.value * 2)).coerceAtLeast(1)
                 val maxSize = IntSize(width, Int.MAX_VALUE)
                 ImageDisplaySize(
-                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)?:maxSize,
+                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)
+                        ?: IntSize(width, containerSize.height.coerceAtLeast(1)),
                     maxSize = maxSize
                 )
             }
 
             else -> {
-                val height = containerSize.height - (sidePaddingPx.value * 2)
+                val height = (containerSize.height - (sidePaddingPx.value * 2)).coerceAtLeast(1)
                 val maxSize = IntSize(Int.MAX_VALUE, height)
                 ImageDisplaySize(
-                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)?:maxSize,
+                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)
+                        ?: IntSize(containerSize.width.coerceAtLeast(1), height),
                     maxSize = maxSize
                 )
             }
@@ -617,7 +619,7 @@ class ContinuousReaderState(
 
         val displaySize = when (readingDirection.value) {
             TOP_TO_BOTTOM -> {
-                val constrainedWidth = containerSize.width - (sidePaddingPx.value * 2)
+                val constrainedWidth = (containerSize.width - (sidePaddingPx.value * 2)).coerceAtLeast(1)
                 when {
                     cachedImageSize != null -> {
                         contentSizeForArea(
@@ -653,7 +655,7 @@ class ContinuousReaderState(
             }
 
             LEFT_TO_RIGHT, RIGHT_TO_LEFT -> {
-                val constrainedHeight = containerSize.height - (sidePaddingPx.value * 2)
+                val constrainedHeight = (containerSize.height - (sidePaddingPx.value * 2)).coerceAtLeast(1)
                 when {
                     cachedImageSize != null -> {
                         contentSizeForArea(
@@ -790,12 +792,15 @@ class ContinuousReaderState(
     }
 
     private fun contentSizeForArea(contentSize: IntSize, maxPageSize: IntSize): IntSize {
+        if (contentSize.width <= 0 || contentSize.height <= 0) return IntSize(1, 1)
+        if (maxPageSize.width <= 0 || maxPageSize.height <= 0) return IntSize(1, 1)
+
         val bestRatio = (maxPageSize.width.toDouble() / contentSize.width)
             .coerceAtMost(maxPageSize.height.toDouble() / contentSize.height)
 
         val scaledSize = IntSize(
-            width = (contentSize.width * bestRatio).roundToInt(),
-            height = (contentSize.height * bestRatio).roundToInt()
+            width = (contentSize.width * bestRatio).roundToInt().coerceAtLeast(1),
+            height = (contentSize.height * bestRatio).roundToInt().coerceAtLeast(1)
         )
 
         return scaledSize

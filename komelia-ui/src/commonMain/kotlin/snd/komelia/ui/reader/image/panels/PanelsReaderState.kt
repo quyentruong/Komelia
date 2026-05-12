@@ -167,6 +167,7 @@ class PanelsReaderState(
         screenScaleState: ScreenScaleState,
     ) {
         val maxPageSize = screenScaleState.areaSize.value
+        if (maxPageSize.width <= 0 || maxPageSize.height <= 0) return
         val zoomFactor = screenScaleState.transformation.value.scale
         val offset = screenScaleState.transformation.value.offset
         val areaSize = screenScaleState.areaSize.value.toSize()
@@ -495,6 +496,7 @@ class PanelsReaderState(
         val defaultScale = ScreenScaleState()
         defaultScale.setAreaSize(containerSize)
         defaultScale.setZoom(0f)
+        if (containerSize.width <= 0 || containerSize.height <= 0) return defaultScale
         val image = page.imageResult?.image ?: return defaultScale
 
         val scaleState = ScreenScaleState()
@@ -553,6 +555,9 @@ class PanelsReaderState(
         targetSize: IntSize,
         panel: ImageRect,
     ): Pair<Offset, Float> {
+        if (imageSize.width <= 0 || imageSize.height <= 0) return Offset.Zero to 0f
+        if (targetSize.width <= 0 || targetSize.height <= 0) return Offset.Zero to 0f
+        if (areaSize.width <= 0 || areaSize.height <= 0) return Offset.Zero to 0f
         val xScale: Float = targetSize.width.toFloat() / imageSize.width
         val yScale: Float = targetSize.height.toFloat() / imageSize.height
 
@@ -563,6 +568,7 @@ class PanelsReaderState(
         val bboxWidth: Float = bboxRight - bboxLeft
         val bboxHeight: Float = bboxBottom - bboxTop
 
+        if (bboxWidth <= 0f || bboxHeight <= 0f) return Offset.Zero to 0f
         val scale: Float = min(
             areaSize.width / bboxWidth,
             areaSize.height / bboxHeight
