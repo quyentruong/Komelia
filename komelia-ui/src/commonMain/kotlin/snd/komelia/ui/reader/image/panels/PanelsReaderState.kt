@@ -493,10 +493,10 @@ class PanelsReaderState(
         page: PanelsPage,
         containerSize: IntSize
     ): ScreenScaleState {
+        if (containerSize.width <= 0 || containerSize.height <= 0) return ScreenScaleState()
         val defaultScale = ScreenScaleState()
         defaultScale.setAreaSize(containerSize)
         defaultScale.setZoom(0f)
-        if (containerSize.width <= 0 || containerSize.height <= 0) return defaultScale
         val image = page.imageResult?.image ?: return defaultScale
 
         val scaleState = ScreenScaleState()
