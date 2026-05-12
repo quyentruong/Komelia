@@ -493,15 +493,18 @@ class PanelsReaderState(
         page: PanelsPage,
         containerSize: IntSize
     ): ScreenScaleState {
-        if (containerSize.width <= 0 || containerSize.height <= 0) return ScreenScaleState()
+        val safeContainerSize = IntSize(
+            containerSize.width.coerceAtLeast(1),
+            containerSize.height.coerceAtLeast(1)
+        )
         val defaultScale = ScreenScaleState()
-        defaultScale.setAreaSize(containerSize)
+        defaultScale.setAreaSize(safeContainerSize)
         defaultScale.setZoom(0f)
         val image = page.imageResult?.image ?: return defaultScale
 
         val scaleState = ScreenScaleState()
-        val fitToScreenSize = image.calculateSizeForArea(containerSize, true) ?: return defaultScale
-        scaleState.setAreaSize(containerSize)
+        val fitToScreenSize = image.calculateSizeForArea(safeContainerSize, true) ?: return defaultScale
+        scaleState.setAreaSize(safeContainerSize)
         scaleState.setTargetSize(fitToScreenSize.toSize())
         scaleState.enableOverscrollArea(true)
 
@@ -513,7 +516,7 @@ class PanelsReaderState(
             val imageSize = image.getOriginalImageSize().getOrNull() ?: return defaultScale
             val (offset, zoom) = getPanelOffsetAndZoom(
                 imageSize = imageSize,
-                areaSize = containerSize,
+                areaSize = safeContainerSize,
                 targetSize = fitToScreenSize,
                 panel = firstPanel
             )
