@@ -167,6 +167,7 @@ class PanelsReaderState(
         screenScaleState: ScreenScaleState,
     ) {
         val maxPageSize = screenScaleState.areaSize.value
+        if (maxPageSize.width <= 0 || maxPageSize.height <= 0) return
         val zoomFactor = screenScaleState.transformation.value.scale
         val offset = screenScaleState.transformation.value.offset
         val areaSize = screenScaleState.areaSize.value.toSize()
@@ -492,14 +493,18 @@ class PanelsReaderState(
         page: PanelsPage,
         containerSize: IntSize
     ): ScreenScaleState {
+        val safeContainerSize = IntSize(
+            containerSize.width.coerceAtLeast(1),
+            containerSize.height.coerceAtLeast(1)
+        )
         val defaultScale = ScreenScaleState()
-        defaultScale.setAreaSize(containerSize)
+        defaultScale.setAreaSize(safeContainerSize)
         defaultScale.setZoom(0f)
         val image = page.imageResult?.image ?: return defaultScale
 
         val scaleState = ScreenScaleState()
-        val fitToScreenSize = image.calculateSizeForArea(containerSize, true) ?: return defaultScale
-        scaleState.setAreaSize(containerSize)
+        val fitToScreenSize = image.calculateSizeForArea(safeContainerSize, true) ?: return defaultScale
+        scaleState.setAreaSize(safeContainerSize)
         scaleState.setTargetSize(fitToScreenSize.toSize())
         scaleState.enableOverscrollArea(true)
 
@@ -511,7 +516,7 @@ class PanelsReaderState(
             val imageSize = image.getOriginalImageSize().getOrNull() ?: return defaultScale
             val (offset, zoom) = getPanelOffsetAndZoom(
                 imageSize = imageSize,
-                areaSize = containerSize,
+                areaSize = safeContainerSize,
                 targetSize = fitToScreenSize,
                 panel = firstPanel
             )
@@ -553,6 +558,9 @@ class PanelsReaderState(
         targetSize: IntSize,
         panel: ImageRect,
     ): Pair<Offset, Float> {
+        if (imageSize.width <= 0 || imageSize.height <= 0) return Offset.Zero to 0f
+        if (targetSize.width <= 0 || targetSize.height <= 0) return Offset.Zero to 0f
+        if (areaSize.width <= 0 || areaSize.height <= 0) return Offset.Zero to 0f
         val xScale: Float = targetSize.width.toFloat() / imageSize.width
         val yScale: Float = targetSize.height.toFloat() / imageSize.height
 
@@ -563,6 +571,7 @@ class PanelsReaderState(
         val bboxWidth: Float = bboxRight - bboxLeft
         val bboxHeight: Float = bboxBottom - bboxTop
 
+        if (bboxWidth <= 0f || bboxHeight <= 0f) return Offset.Zero to 0f
         val scale: Float = min(
             areaSize.width / bboxWidth,
             areaSize.height / bboxHeight
