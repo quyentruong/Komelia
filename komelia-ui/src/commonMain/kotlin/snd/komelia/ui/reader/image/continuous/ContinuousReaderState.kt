@@ -80,6 +80,7 @@ class ContinuousReaderState(
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val imageLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(3))
+
     val lazyListState = LazyListState(0, 0)
 
     val readingDirection = MutableStateFlow(TOP_TO_BOTTOM)
@@ -390,64 +391,26 @@ class ContinuousReaderState(
 
     suspend fun getImage(requestPage: PageMetadata): ReaderImageResult {
         val requestedPageJob = launchImageJob(requestPage)
-        val pages = getPagesFor(requestPage.bookId)
-        if (pages != null) {
-            val currentIndex = requestPage.pageNumber - 1
 
-            val startIndex = (currentIndex - 1).coerceAtLeast(0) // 1 previous page
-            val endIndex = (currentIndex + 10).coerceAtMost(pages.size - 1) // 10 next pages
+        val nextPage = getPagesFor(requestPage.bookId)?.getOrNull(requestPage.pageNumber)
+        if (nextPage != null) {
+            if (!imagesInUse.containsKey(nextPage.toPageId())) {
+                imageLoadScope.launch {
+                    val result = launchImageJob(nextPage).await()
+                    result.image?.let {
+                        val size = getImageDisplaySize(it)
+                        it.requestUpdate(
+                            maxDisplaySize = size.maxSize,
+                            zoomFactor = screenScaleState.transformation.value.scale,
+                            visibleDisplaySize = screenScaleState.areaSize.value.toIntRect(),
+                        )
+                    }
 
-            val maxDistance = kotlin.math.max(currentIndex - startIndex, endIndex - currentIndex)
-
-            // prioritized order: nearest pages first, preferring forward (next) pages
-            for (d in 1..maxDistance) {
-                val nextIndex = currentIndex + d
-                if (nextIndex in startIndex..endIndex) {
-                    pages.getOrNull(nextIndex)?.let { page -> prefetchIfNeeded(page) }
-                }
-
-                val prevIndex = currentIndex - d
-                if (prevIndex in startIndex..endIndex) {
-                    pages.getOrNull(prevIndex)?.let { page -> prefetchIfNeeded(page) }
                 }
             }
         }
 
         return requestedPageJob.await()
-    }
-
-    private fun prefetchIfNeeded(page: PageMetadata) {
-        val pageId = page.toPageId()
-
-        // Treat cancelled or failed cached jobs as cache misses so we can retry prefetching.
-        val cached = imageCache.get(pageId)
-        if (cached != null) {
-            if (cached.isCancelled) {
-                imageCache.invalidate(pageId)
-            } else if (cached.isCompleted) {
-                try {
-                    cached.getCompleted()
-                } catch (_: Throwable) {
-                    // Completed exceptionally — invalidate so we can retry.
-                    imageCache.invalidate(pageId)
-                }
-            }
-        }
-
-        if (!imagesInUse.containsKey(pageId) && imageCache.get(pageId) == null) {
-            val job = launchImageJob(page)
-            imageLoadScope.launch {
-                val result = job.await()
-                result.image?.let {
-                    val size = getImageDisplaySize(it)
-                    it.requestUpdate(
-                        maxDisplaySize = size.maxSize,
-                        zoomFactor = screenScaleState.transformation.value.scale,
-                        visibleDisplaySize = screenScaleState.areaSize.value.toIntRect(),
-                    )
-                }
-            }
-        }
     }
 
     private fun launchImageJob(requestPage: PageMetadata): Deferred<ReaderImageResult> {
@@ -569,21 +532,19 @@ class ContinuousReaderState(
         val containerSize = screenScaleState.areaSize.value
         return when (readingDirection.value) {
             TOP_TO_BOTTOM -> {
-                val width = (containerSize.width - (sidePaddingPx.value * 2)).coerceAtLeast(1)
+                val width = containerSize.width - (sidePaddingPx.value * 2)
                 val maxSize = IntSize(width, Int.MAX_VALUE)
                 ImageDisplaySize(
-                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)
-                        ?: IntSize(width, containerSize.height.coerceAtLeast(1)),
+                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)?:maxSize,
                     maxSize = maxSize
                 )
             }
 
             else -> {
-                val height = (containerSize.height - (sidePaddingPx.value * 2)).coerceAtLeast(1)
+                val height = containerSize.height - (sidePaddingPx.value * 2)
                 val maxSize = IntSize(Int.MAX_VALUE, height)
                 ImageDisplaySize(
-                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)
-                        ?: IntSize(containerSize.width.coerceAtLeast(1), height),
+                    displaySize = image.calculateSizeForArea(maxSize, readerState.imageStretchToFit.value)?:maxSize,
                     maxSize = maxSize
                 )
             }
@@ -619,7 +580,7 @@ class ContinuousReaderState(
 
         val displaySize = when (readingDirection.value) {
             TOP_TO_BOTTOM -> {
-                val constrainedWidth = (containerSize.width - (sidePaddingPx.value * 2)).coerceAtLeast(1)
+                val constrainedWidth = containerSize.width - (sidePaddingPx.value * 2)
                 when {
                     cachedImageSize != null -> {
                         contentSizeForArea(
@@ -655,7 +616,7 @@ class ContinuousReaderState(
             }
 
             LEFT_TO_RIGHT, RIGHT_TO_LEFT -> {
-                val constrainedHeight = (containerSize.height - (sidePaddingPx.value * 2)).coerceAtLeast(1)
+                val constrainedHeight = containerSize.height - (sidePaddingPx.value * 2)
                 when {
                     cachedImageSize != null -> {
                         contentSizeForArea(
@@ -792,15 +753,12 @@ class ContinuousReaderState(
     }
 
     private fun contentSizeForArea(contentSize: IntSize, maxPageSize: IntSize): IntSize {
-        if (contentSize.width <= 0 || contentSize.height <= 0) return IntSize(1, 1)
-        if (maxPageSize.width <= 0 || maxPageSize.height <= 0) return IntSize(1, 1)
-
         val bestRatio = (maxPageSize.width.toDouble() / contentSize.width)
             .coerceAtMost(maxPageSize.height.toDouble() / contentSize.height)
 
         val scaledSize = IntSize(
-            width = (contentSize.width * bestRatio).roundToInt().coerceAtLeast(1),
-            height = (contentSize.height * bestRatio).roundToInt().coerceAtLeast(1)
+            width = (contentSize.width * bestRatio).roundToInt(),
+            height = (contentSize.height * bestRatio).roundToInt()
         )
 
         return scaledSize

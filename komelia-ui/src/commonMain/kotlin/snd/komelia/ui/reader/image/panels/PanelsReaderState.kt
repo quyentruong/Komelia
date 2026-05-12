@@ -71,11 +71,8 @@ class PanelsReaderState(
 ) {
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val pageLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(2))
-    private val prefetchPreviousCount = 1
-    private val prefetchNextCount = 10
     private val imageCache = Cache.Builder<PageId, Deferred<PanelsPage>>()
-        .maximumCacheSize(40)
+        .maximumCacheSize(10)
         .eventListener {
             val value = when (it) {
                 is Evicted -> it.value
@@ -157,7 +154,6 @@ class PanelsReaderState(
 
     fun stop() {
         stateScope.coroutineContext.cancelChildren()
-        prefetchScope.coroutineContext.cancelChildren()
         screenScaleState.enableOverscrollArea(false)
         imageCache.invalidateAll()
     }
@@ -167,7 +163,6 @@ class PanelsReaderState(
         screenScaleState: ScreenScaleState,
     ) {
         val maxPageSize = screenScaleState.areaSize.value
-        if (maxPageSize.width <= 0 || maxPageSize.height <= 0) return
         val zoomFactor = screenScaleState.transformation.value.scale
         val offset = screenScaleState.transformation.value.offset
         val areaSize = screenScaleState.areaSize.value.toSize()
@@ -368,6 +363,7 @@ class PanelsReaderState(
     private suspend fun doPageLoad(pageIndex: Int) {
         val pageMeta = pageMetadata.value[pageIndex]
         val downloadJob = launchDownload(pageMeta)
+        preloadImagesBetween(pageIndex)
 
         if (downloadJob.isActive) {
             currentPage.value = PanelsPage(
@@ -382,8 +378,6 @@ class PanelsReaderState(
         }
 
         val page = downloadJob.await()
-        // Start prefetching only after the current page finished loading to avoid CPU contention.
-        preloadImagesBetween(pageIndex)
         val sortedPanelsPage = if (page.panelData != null) {
             val sortedPanels = sortPanels(
                 page.panelData.panels,
@@ -405,15 +399,12 @@ class PanelsReaderState(
     }
 
     private fun preloadImagesBetween(pageIndex: Int) {
-        val pages = pageMetadata.value
-        if (pages.isEmpty()) return
-
-        val start = max(0, pageIndex - prefetchPreviousCount)
-        val end = min(pages.size - 1, pageIndex + prefetchNextCount)
-        val loadRange = (start..end).filter { it != pageIndex }
+        val previousPage = (pageIndex - 1).coerceAtLeast(0)
+        val nextPage = (pageIndex + 1).coerceAtMost(pageMetadata.value.size - 1)
+        val loadRange = (previousPage..nextPage).filter { it != pageIndex }
 
         for (index in loadRange) {
-            val imageJob = launchDownload(pages[index], prefetchScope)
+            val imageJob = launchDownload(pageMetadata.value[index])
             pageLoadScope.launch {
                 val image = imageJob.await()
                 val scale = getScaleFor(image, screenScaleState.areaSize.value)
@@ -422,12 +413,12 @@ class PanelsReaderState(
         }
     }
 
-    private fun launchDownload(meta: PageMetadata, scope: CoroutineScope = pageLoadScope): Deferred<PanelsPage> {
+    private fun launchDownload(meta: PageMetadata): Deferred<PanelsPage> {
         val pageId = meta.toPageId()
         val cached = imageCache.get(pageId)
         if (cached != null && !cached.isCancelled) return cached
 
-        val loadJob: Deferred<PanelsPage> = scope.async {
+        val loadJob: Deferred<PanelsPage> = pageLoadScope.async {
             val imageResult = imageLoader.loadReaderImage(meta.bookId, meta.pageNumber)
             val image = imageResult.image ?: return@async PanelsPage(
                 metadata = meta,
@@ -493,18 +484,14 @@ class PanelsReaderState(
         page: PanelsPage,
         containerSize: IntSize
     ): ScreenScaleState {
-        val safeContainerSize = IntSize(
-            containerSize.width.coerceAtLeast(1),
-            containerSize.height.coerceAtLeast(1)
-        )
         val defaultScale = ScreenScaleState()
-        defaultScale.setAreaSize(safeContainerSize)
+        defaultScale.setAreaSize(containerSize)
         defaultScale.setZoom(0f)
         val image = page.imageResult?.image ?: return defaultScale
 
         val scaleState = ScreenScaleState()
-        val fitToScreenSize = image.calculateSizeForArea(safeContainerSize, true) ?: return defaultScale
-        scaleState.setAreaSize(safeContainerSize)
+        val fitToScreenSize = image.calculateSizeForArea(containerSize, true) ?: return defaultScale
+        scaleState.setAreaSize(containerSize)
         scaleState.setTargetSize(fitToScreenSize.toSize())
         scaleState.enableOverscrollArea(true)
 
@@ -516,7 +503,7 @@ class PanelsReaderState(
             val imageSize = image.getOriginalImageSize().getOrNull() ?: return defaultScale
             val (offset, zoom) = getPanelOffsetAndZoom(
                 imageSize = imageSize,
-                areaSize = safeContainerSize,
+                areaSize = containerSize,
                 targetSize = fitToScreenSize,
                 panel = firstPanel
             )
@@ -558,9 +545,6 @@ class PanelsReaderState(
         targetSize: IntSize,
         panel: ImageRect,
     ): Pair<Offset, Float> {
-        if (imageSize.width <= 0 || imageSize.height <= 0) return Offset.Zero to 0f
-        if (targetSize.width <= 0 || targetSize.height <= 0) return Offset.Zero to 0f
-        if (areaSize.width <= 0 || areaSize.height <= 0) return Offset.Zero to 0f
         val xScale: Float = targetSize.width.toFloat() / imageSize.width
         val yScale: Float = targetSize.height.toFloat() / imageSize.height
 
@@ -571,7 +555,6 @@ class PanelsReaderState(
         val bboxWidth: Float = bboxRight - bboxLeft
         val bboxHeight: Float = bboxBottom - bboxTop
 
-        if (bboxWidth <= 0f || bboxHeight <= 0f) return Offset.Zero to 0f
         val scale: Float = min(
             areaSize.width / bboxWidth,
             areaSize.height / bboxHeight
