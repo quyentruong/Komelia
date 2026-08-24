@@ -3,11 +3,12 @@ name: Build Android Debug APK
 on:
   workflow_dispatch:
 
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    
+
     steps:
     # ========================================
     # SETUP
@@ -111,7 +112,7 @@ jobs:
     # BUILD WEBUI
     # ========================================
     - name: 🌐 Build WebUI
-      run: ./gradlew buildWebui
+      run: ./gradlew :komfWebUI
 
     # ========================================
     # BUILD DEBUG APK
@@ -119,19 +120,19 @@ jobs:
     - name: 🚀 Build Debug APK
       run: |
         echo "Building Debug APK (auto-signed with debug key)..."
-        ./gradlew :komelia-app:assembleDebug --build-cache --parallel
+        ./gradlew :komelia-app:androidApp:assembleDebug --build-cache --parallel
 
     - name: 📦 Get APK Info
       id: apk
       run: |
-        APK_PATH=$(find komelia-app/build/outputs/apk/debug -name "*.apk" | head -1)
+        APK_PATH=$(find komelia-app/androidApp/build/outputs/apk/debug -name "*.apk" | head -1)
         APK_NAME=$(basename "$APK_PATH")
         APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
-        
+
         echo "path=$APK_PATH" >> $GITHUB_OUTPUT
         echo "name=$APK_NAME" >> $GITHUB_OUTPUT
         echo "size=$APK_SIZE" >> $GITHUB_OUTPUT
-        
+
         echo "📦 APK: $APK_NAME ($APK_SIZE)"
 
     # ========================================
@@ -157,17 +158,17 @@ jobs:
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
         ## ✅ Build Successful!
-        
+
         | Info | Value |
         |------|-------|
         | 📦 APK | \`${{ steps.apk.outputs.name }}\` |
         | 📏 Size | ${{ steps.apk.outputs.size }} |
         | 🏗️ Build # | ${{ github.run_number }} |
         | ⚡ Native Cache | ${{ steps.cache-native.outputs.cache-hit == 'true' && '✅ HIT (~25 min saved)' || '❌ MISS' }} |
-        
+
         ### 📥 Download
         Scroll up → **Artifacts** section → Download APK
-        
+
         ### 📱 Install
         1. Copy APK to phone
         2. Enable "Install from Unknown Sources"
