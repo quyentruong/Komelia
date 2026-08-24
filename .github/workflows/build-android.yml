@@ -24,11 +24,6 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: 📦 Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
     # ========================================
     # CACHE - Tăng tốc độ build
     # ========================================
@@ -55,15 +50,6 @@ jobs:
         path: cmake/build-android-aarch64
         key: ${{ runner.os }}-native-${{ hashFiles('cmake/**', 'third_party/**', 'komelia-infra/**') }}
         restore-keys: ${{ runner.os }}-native-
-
-    - name: 💾 Cache WebUI
-      uses: actions/cache@v4
-      with:
-        path: |
-          komelia-epub-reader/*/node_modules
-          komelia-epub-reader/*/dist
-        key: ${{ runner.os }}-webui-${{ hashFiles('komelia-epub-reader/**') }}
-        restore-keys: ${{ runner.os }}-webui-
 
     # ========================================
     # BUILD DOCKER (nếu cần)
@@ -109,18 +95,12 @@ jobs:
       run: ./gradlew android-aarch64_copyJniLibs
 
     # ========================================
-    # BUILD WEBUI
-    # ========================================
-    - name: 🌐 Build WebUI
-      run: ./gradlew :komfWebUI
-
-    # ========================================
     # BUILD DEBUG APK
     # ========================================
     - name: 🚀 Build Debug APK
       run: |
-        echo "Building Debug APK (auto-signed with debug key)..."
-        ./gradlew :komelia-app:androidApp:assembleDebug --build-cache --parallel
+        echo "Building ARM64 Debug APK (auto-signed with debug key)..."
+        ./gradlew :komelia-app:androidApp:assembleDebug -Pandroid.injected.build.abi=arm64-v8a --build-cache --parallel
 
     - name: 📦 Get APK Info
       id: apk
@@ -141,7 +121,7 @@ jobs:
     - name: 📤 Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: komelia-debug-v${{ github.run_number }}
+        name: komelia-debug-arm64-v${{ github.run_number }}
         path: ${{ steps.apk.outputs.path }}
         retention-days: 30
 
