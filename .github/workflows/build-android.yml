@@ -105,7 +105,12 @@ jobs:
     - name: 📦 Get APK Info
       id: apk
       run: |
-        APK_PATH=$(find komelia-app/androidApp/build/outputs/apk/debug -name "*.apk" | head -1)
+        set -euo pipefail
+        APK_PATH=$(find komelia-app/androidApp/build/outputs/apk -type f -name "*.apk" | head -1)
+        if [ -z "$APK_PATH" ]; then
+          echo "❌ No APK found under komelia-app/androidApp/build/outputs/apk"
+          exit 1
+        fi
         APK_NAME=$(basename "$APK_PATH")
         APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
 
@@ -122,7 +127,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: komelia-debug-arm64-v${{ github.run_number }}
-        path: ${{ steps.apk.outputs.path }}
+        path: komelia-app/androidApp/build/outputs/apk/**/*.apk
         retention-days: 30
 
     # ========================================
