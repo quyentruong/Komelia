@@ -47,7 +47,7 @@ jobs:
       id: cache-native
       uses: actions/cache/restore@v4
       with:
-        path: cmake/build-android-aarch64
+        path: cmake/build-android-aarch64/sysroot/lib
         key: ${{ runner.os }}-native-aarch64-v2-${{ hashFiles('CMakeLists.txt', 'cmake/android.Dockerfile', 'cmake/android-build.sh', 'cmake/external/*.cmake', 'cmake/patches/**', 'komelia-infra/image-decoder/**', 'komelia-infra/jni/**', 'komelia-infra/onnxruntime/**') }}
         restore-keys: |
           ${{ runner.os }}-native-aarch64-v2-
@@ -90,15 +90,15 @@ jobs:
         echo "⚠️ Cache MISS - Building native libs (~25 min)..."
         docker run -v $PWD:/build komelia-build-android aarch64
 
+    - name: 🔓 Fix Permissions
+      run: sudo chown -R $(id -u):$(id -g) .
+
     - name: 💾 Save Native Build Cache
       if: always() && steps.cache-native.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
-        path: cmake/build-android-aarch64
-        key: ${{ steps.cache-native.outputs.cache-primary-key }}
-
-    - name: 🔓 Fix Permissions
-      run: sudo chown -R $(id -u):$(id -g) .
+        path: cmake/build-android-aarch64/sysroot/lib
+        key: ${{ runner.os }}-native-aarch64-v2-${{ hashFiles('CMakeLists.txt', 'cmake/android.Dockerfile', 'cmake/android-build.sh', 'cmake/external/*.cmake', 'cmake/patches/**', 'komelia-infra/image-decoder/**', 'komelia-infra/jni/**', 'komelia-infra/onnxruntime/**') }}
 
     - name: 📋 Copy JNI Libraries
       run: ./gradlew android-aarch64_copyJniLibs
@@ -108,8 +108,8 @@ jobs:
     # ========================================
     - name: 🚀 Build Debug APK
       run: |
-        echo "Building ARM64 Debug APK (auto-signed with debug key)..."
-        ./gradlew :komelia-app:androidApp:assembleDebug -Pandroid.injected.build.abi=arm64-v8a --build-cache --parallel
+        echo "Building Debug APK (universal, auto-signed with debug key)..."
+        ./gradlew :komelia-app:androidApp:assembleDebug --build-cache --parallel
 
     - name: 📦 Get APK Info
       id: apk
