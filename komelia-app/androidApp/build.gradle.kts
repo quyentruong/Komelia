@@ -69,7 +69,7 @@ android {
         buildConfig = true
     }
     defaultConfig {
-        applicationId = "io.github.snd_r.komelia"
+        applicationId = "io.github.quyentruong.komelia"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 20
