@@ -43,13 +43,15 @@ jobs:
         key: ${{ runner.os }}-docker-${{ hashFiles('cmake/android.Dockerfile') }}
         restore-keys: ${{ runner.os }}-docker-
 
-    - name: 💾 Cache Native Build
+    - name: 💾 Restore Native Build Cache
       id: cache-native
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: cmake/build-android-aarch64
-        key: ${{ runner.os }}-native-${{ hashFiles('cmake/**', 'third_party/**', 'komelia-infra/**') }}
-        restore-keys: ${{ runner.os }}-native-
+        key: ${{ runner.os }}-native-aarch64-v2-${{ hashFiles('CMakeLists.txt', 'cmake/android.Dockerfile', 'cmake/android-build.sh', 'cmake/external/*.cmake', 'cmake/patches/**', 'komelia-infra/image-decoder/**', 'komelia-infra/jni/**', 'komelia-infra/onnxruntime/**') }}
+        restore-keys: |
+          ${{ runner.os }}-native-aarch64-v2-
+          ${{ runner.os }}-native-aarch64-
 
     # ========================================
     # BUILD DOCKER (nếu cần)
@@ -88,6 +90,13 @@ jobs:
         echo "⚠️ Cache MISS - Building native libs (~25 min)..."
         docker run -v $PWD:/build komelia-build-android aarch64
 
+    - name: 💾 Save Native Build Cache
+      if: always() && steps.cache-native.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: cmake/build-android-aarch64
+        key: ${{ steps.cache-native.outputs.cache-primary-key }}
+
     - name: 🔓 Fix Permissions
       run: sudo chown -R $(id -u):$(id -g) .
 
@@ -106,9 +115,13 @@ jobs:
       id: apk
       run: |
         set -euo pipefail
-        APK_PATH=$(find komelia-app/androidApp/build/outputs/apk -type f -name "*.apk" | head -1)
+        # Search common Gradle output roots first, then fall back to a repo-wide search.
+        APK_PATH=$(find build komelia-app -type f -path "*/outputs/apk/*" -name "*.apk" 2>/dev/null | head -1)
         if [ -z "$APK_PATH" ]; then
-          echo "❌ No APK found under komelia-app/androidApp/build/outputs/apk"
+          APK_PATH=$(find . -type f -name "*.apk" 2>/dev/null | head -1)
+        fi
+        if [ -z "$APK_PATH" ]; then
+          echo "❌ No APK found in expected Gradle output directories"
           exit 1
         fi
         APK_NAME=$(basename "$APK_PATH")
@@ -127,7 +140,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: komelia-debug-arm64-v${{ github.run_number }}
-        path: komelia-app/androidApp/build/outputs/apk/**/*.apk
+        path: ${{ steps.apk.outputs.path }}
         retention-days: 30
 
     # ========================================
