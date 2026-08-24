@@ -17,6 +17,9 @@ import cafe.adriel.voyager.core.screen.Screen
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.Navigator
 import cafe.adriel.voyager.navigator.currentOrThrow
+import io.github.snd_r.komelia.ui.komelia_ui.generated.resources.Res
+import io.github.snd_r.komelia.ui.komelia_ui.generated.resources.login_title
+import org.jetbrains.compose.resources.stringResource
 import snd.komelia.ui.LoadState.Error
 import snd.komelia.ui.LoadState.Loading
 import snd.komelia.ui.LoadState.Success
@@ -30,6 +33,7 @@ import snd.komelia.ui.platform.PlatformTitleBar
 import snd.komelia.ui.platform.PlatformType.DESKTOP
 import snd.komelia.ui.platform.PlatformType.MOBILE
 import snd.komelia.ui.platform.PlatformType.WEB_KOMF
+import snd.komelia.ui.platform.hasLanPermission
 import snd.komelia.ui.settings.SettingsScreenContainer
 
 class LoginScreen : Screen {
@@ -41,8 +45,9 @@ class LoginScreen : Screen {
         val viewModelFactory = LocalViewModelFactory.current
         val isOffline = LocalOfflineMode.current
         val vm = rememberScreenModel(isOffline.value.toString()) { viewModelFactory.getLoginViewModel() }
+        val hasLanPermission = hasLanPermission()
 
-        LaunchedEffect(Unit) { vm.initialize() }
+        LaunchedEffect(Unit) { vm.initialize(hasLanPermission) }
         Column {
             PlatformTitleBar { }
             when (platform) {
@@ -52,7 +57,7 @@ class LoginScreen : Screen {
                         contentAlignment = Alignment.Center
                     ) { ScreenContent(vm, rootNavigator) }
 
-                WEB_KOMF -> SettingsScreenContainer(title = "Komga Login") {
+                WEB_KOMF -> SettingsScreenContainer(title = stringResource(Res.string.login_title)) {
                     ScreenContent(vm, rootNavigator)
                 }
             }
@@ -71,14 +76,14 @@ class LoginScreen : Screen {
             Loading, Uninitialized -> LoginLoadingContent(viewModel::cancel)
 
             is Error -> LoginContent(
-                url = viewModel.url,
-                onUrlChange = viewModel::url::set,
-                user = viewModel.user,
-                onUserChange = { viewModel.user = it },
-                password = viewModel.password,
-                onPasswordChange = { viewModel.password = it },
-                userLoginError = viewModel.userLoginError,
-                autoLoginError = viewModel.autoLoginError,
+                url = viewModel.url.collectAsState().value,
+                onUrlChange = { viewModel.url.value = it },
+                user = viewModel.user.collectAsState().value,
+                onUserChange = { viewModel.user.value = it },
+                password = viewModel.password.collectAsState().value,
+                onPasswordChange = { viewModel.password.value = it },
+                userLoginError = viewModel.userLoginError.collectAsState().value,
+                autoLoginError = viewModel.autoLoginError.collectAsState().value,
                 onAutoLoginRetry = viewModel::retryAutoLogin,
                 onLogin = viewModel::loginWithCredentials,
                 offlineIsAvailable = viewModel.offlineIsAvailable.collectAsState().value,
