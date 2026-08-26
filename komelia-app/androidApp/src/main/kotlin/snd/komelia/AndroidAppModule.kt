@@ -240,9 +240,9 @@ class AndroidAppModule(
                 agent = komeliaUserAgent
             }
             install(HttpTimeout) {
-                requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
-                connectTimeoutMillis = 600_000
-                socketTimeoutMillis = 600_000
+                requestTimeoutMillis = 120_000
+                connectTimeoutMillis = 30_000
+                socketTimeoutMillis = 60_000
             }
         }
 
